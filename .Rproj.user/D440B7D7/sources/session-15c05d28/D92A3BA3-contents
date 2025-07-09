@@ -1,0 +1,28 @@
+# Genera shapefile parcelas sinfonevada
+# - Descargamos dicc_parcelas from diccionarios_sf_v2 as dicc_parcelas.csv 
+# - Generados shapefile 
+
+library(sf)
+library(tidyverse)
+library(here)
+
+# Cargamos diccionario de parcelas
+dic_parcelas <- read_csv(here::here("data/raw/dicc_parcelas.csv"))
+
+dic_fcc <- read_csv(here::here("data/raw/dicc_fcc.csv"))
+
+
+plots <- dic_parcelas |> 
+  dplyr::select(cod_parcela, log = coord_x, lat = coord_y, fcc_arborea, cobertura_total) 
+
+plots_sf <- st_as_sf(plots, coords = c("log", "lat"), crs = 23030)
+sf::st_write(plots_sf, here::here("data/geoinfo/parcelas_sinfonevada.shp")) 
+
+
+#### 
+
+
+
+
+
+  

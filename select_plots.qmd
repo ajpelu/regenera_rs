@@ -1,0 +1,248 @@
+---
+title: "Prepare spatial data "
+format: html
+bibliography: references.bib
+csl: ecology.csl
+---
+
+## Aim
+- Generate a shapefile with the distribution of sinfonevada plots
+- Select all plots that intersects with distribution of pine species in SN 
+- Filter out data with forest cover > 50%
+
+### Generate shapefile of Sinfonevada 
+
+- Download `dicc_parcelas` from `diccionarios_sf_v2` and save as `dicc_parcelas.csv`. There is an issue: it contains 598 plots, but there is an unmacth with plots used by @GomezAparicioetal2009ArePine. We use the file `TODAS_LAS_VARIABLES_ambientales.xls` from @GomezAparicioetal2009ArePine  
+- Download `dicc_fcc` from `diccionarios_sf_v2` and save as `dicc_fcc.csv`
+
+```{r}
+#| messsage: false
+# Load required libraries
+library(sf)
+library(tidyverse)
+library(here)
+```
+
+
+```{r}
+all_plots <- readxl::read_excel(here::here("data/raw/lorena/TODAS_LAS_VARIABLES_ambientales.xls")) |> 
+    dplyr::select(plot_id = ID_PARCELA, plot_code = NOMBRE, log = UTM_X_GPS, lat = UTM_Y_GPS) 
+
+plot_sf <- st_as_sf(all_plots, coords = c("log", "lat"), crs = 23030) 
+
+```
+
+### Potential plots 
+
+#### Pine plots from @GomezAparicioetal2009ArePine
+
+```{r}
+pine_lorena <- readxl::read_excel(here::here("data/raw/lorena/ALL sólo repoblaciones.xls")) |> 
+  dplyr::select(plot_id = ID) |> 
+  left_join(all_plots)
+```
+
+
+#### Pine plots from @NavarroGonzalezetal2013WeightLanduse 
+
+```{r}
+pine_irene <- readxl::read_excel(here::here("data/raw/irene/matriz_usos.xls")) |> 
+  dplyr::select(plot_id = ID) |> 
+  left_join(all_plots)
+```
+
+#### Read pine distribution 
+
+- Select plots that intersect with pine distribution using REDIAM *Pinus* distribution maps. 
+
+```{r}
+#| eval: false
+
+p <- "/Users/ajpelu/Google Drive/My Drive/_proyectos/pinares_andalucia/"
+
+hal <- st_read(paste0(p, "pinus_halepensis20_2023.shp"), quiet = TRUE)
+pin <- st_read(paste0(p, "pinus_pinaster_subsp20_2023.shp"), quiet = TRUE)
+nig <- st_read(paste0(p, "pinus_nigra_subsp20_2023.shp"), quiet = TRUE)
+syl <- st_read(paste0(p, "pinus_sylvestris_subsp20_2023.shp"), quiet = TRUE)
+
+
+pinus <- bind_rows(hal, pin, nig, syl) |> st_transform(23030)
+
+# read EENNPP 
+sn <- st_read(here::here("data/geoinfo/sn_wdpa.shp"),
+              quiet = TRUE) |> st_transform(23030)
+
+pinus_sn <- st_intersection(pinus, sn)
+
+
+pinus_sn <- st_make_valid(pinus_sn)
+st_write(pinus_sn, here::here("data/geoinfo/pinares_sn_rediam.shp"), append = FALSE)
+
+```
+
+
+```{r}
+pinares_sn_rediam <- st_read(here::here("data/geoinfo/pinares_sn_rediam.shp"), quiet = TRUE)
+plot_sf_pinares_rediam <- st_filter(plot_sf, pinares_sn_rediam) 
+
+
+
+plot_sf_pinares_rediam_aux <- st_join(plot_sf, pinares_sn_rediam) |> 
+  dplyr::select(plot_id, plot_code, geometry, origen, pct_arbo, pct_sp, sp = especie) 
+
+
+pct_arbo_df <- plot_sf_pinares_rediam_aux |>
+  st_drop_geometry() |>
+  group_by(plot_id) |>
+  summarise(pct_arbo = unique(pct_arbo))
+
+
+
+p <- plot_sf_pinares_rediam_aux |> 
+  st_drop_geometry() |> 
+  group_by(plot_id,plot_code) |> 
+  mutate(rep = row_number()) |> 
+  pivot_wider(
+    id_cols = plot_id,
+    names_from = rep,
+    values_from = c(pct_sp, sp),
+    names_sep = "_"
+  ) |> 
+  inner_join(pct_arbo_df)
+
+
+pure <- p |> 
+  filter(!is.na(pct_sp_1)) |> 
+  filter(is.na(pct_sp_2)) |> 
+  mutate(type = "monosp") |> 
+  mutate(sp_princ = sp_1, 
+         pct_sp_1 = as.character(pct_sp_1)) |> 
+  rename(pct_sp = pct_sp_1, sps = sp_1) |> 
+  dplyr::select(-c(sp_2, sp_3, pct_sp_2, pct_sp_3))
+
+
+mix2 <- p |> 
+  filter(!is.na(pct_sp_1)) |> 
+  filter(!is.na(pct_sp_2)) |> 
+  filter(is.na(pct_sp_3)) |> 
+  mutate(sp_princ = ifelse(pct_sp_1 > pct_sp_2, sp_1, sp_2)) |> 
+  unite(col = "sps", sp_1:sp_2, sep = " | ", remove = FALSE) |> 
+  unite(col = "pct_sp", pct_sp_1:pct_sp_2, sep = " | ", remove = FALSE) |> 
+  dplyr::select(-c(sp_1, sp_2, sp_3, pct_sp_2, pct_sp_1, pct_sp_2, pct_sp_3)) |> 
+  mutate(type = "multi_sp")
+  
+
+mix3 <- p |> 
+  filter(!is.na(pct_sp_1)) |> 
+  filter(!is.na(pct_sp_2)) |> 
+  filter(!is.na(pct_sp_3)) |> 
+  rowwise() |> 
+  mutate(pct = pmax(pct_sp_1, pct_sp_2, pct_sp_3),
+           cuala = paste0("pct_sp_", which.max(c_across(c(pct_sp_1, pct_sp_2, pct_sp_3))))
+  ) |> 
+  ungroup() |> 
+  mutate(cuala_aux = str_remove(cuala, "pct_"),
+    sp_princ = case_when(
+      cuala_aux == "sp_1" ~ sp_1,
+      cuala_aux == "sp_2" ~ sp_2,
+      cuala_aux == "sp_3" ~ sp_3
+  )) |> 
+  unite(col = "sps", sp_1:sp_3, sep = " | ", remove = FALSE) |> 
+  unite(col = "pct_sp", pct_sp_1:pct_sp_3, sep = " | ", remove = FALSE) |> 
+  dplyr::select(-c(sp_1, sp_2, sp_3, pct_sp_2, pct_sp_1, pct_sp_2, pct_sp_3, pct, cuala, cuala_aux)) |> 
+  mutate(type = "multi_sp")
+
+           
+           
+
+all_rediam <- bind_rows(pure, mix2, mix3)
+
+plot_sf_pinares_rediam_unique <- plot_sf_pinares_rediam |> 
+  left_join(all_rediam)
+
+
+# Exportar esto 
+# plot_sf_pinares_rediam_unique 
+```
+
+
+- Select plots that intersect with pine ecosystem using Ecosystem map of Sierra Nevada [@PerezLuqueetal2019MapEcosystems]
+
+
+```{r}
+sn_eco <- st_read(here::here("data/geoinfo/ecosistemas.shp"), 
+                  quiet = TRUE) |> st_transform(23030)
+# pinares_sn <- sn_eco |> 
+#   filter(ECOSISTE_1 %in% c("Repoblaciones de coníferas", "Pinares autóctonos de P. sylvestris", "Pinares autóctonos sobre dolomías"))
+
+plot_sf_pinares_ecosys <- st_join(plot_sf, sn_eco) |> 
+  dplyr::select(plot_id, plot_code, ecosys_sn = ECOSISTE_1) 
+
+```
+
+
+
+#### Add FCC from Sinfonevada 
+
+```{r}
+# run only once 
+dic_parcelas <- read_csv(here::here("data/raw/dicc_parcelas.csv"))
+
+dic_fcc <- read_csv(here::here("data/raw/dicc_fcc.csv"))
+
+plot_fcc <- dic_parcelas |> 
+  dplyr::select(plot_id = id_parcela, fcc_arborea, cobertura_total) 
+```
+
+
+#### Elevation 
+```{r}
+plot_elev <- readxl::read_excel(here::here("data/raw/localizacion_parcelas.xls")) |> 
+  dplyr::select(plot_id = ID_PARCELA, elev = ALTITUD) 
+```
+
+
+
+# All plots 
+```{r}
+data_all <- all_plots |> 
+  left_join(
+    pine_lorena |> mutate(lorena = 1)
+  ) |> 
+  left_join(
+    pine_irene |> mutate(irene = 1)
+  ) |> 
+  left_join(
+    plot_sf_pinares_rediam_unique |> mutate(pino_rediam = 1)) |> 
+  left_join(plot_sf_pinares_ecosys |> 
+              st_drop_geometry() |> 
+              dplyr::select(plot_id, ecosys_sn)) |> 
+  left_join(plot_fcc) |> 
+  left_join(plot_elev) |> 
+  st_drop_geometry()
+
+
+data_all_sf <- st_as_sf(data_all, coords = c("log", "lat"), crs = 23030) 
+
+# Export as shapefile 
+sf::st_write(data_all_sf, here::here("data/geoinfo/parcelas_sinfonevada.shp"), append = FALSE) 
+
+```
+
+
+
+## Selection
+
+```{r}
+data_all_sf_lorena <- data_all_sf |> filter(lorena == 1)
+sf::st_write(data_all_sf_lorena, here::here("data/geoinfo/parcelas_sinfonevada_lorena.shp"), append = FALSE) 
+```
+
+
+
+- In this [link](https://drive.google.com/drive/folders/0ByE6jT8_uLBRZVJtdWpmMDUyeGM?resourcekey=0-TMC3Cafd8vWEet7QTZ9gYg), there are several data about the paper of @GomezAparicioetal2009ArePine
+
+
+
+
+
